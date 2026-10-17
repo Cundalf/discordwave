@@ -32,7 +32,7 @@ export function suenaEmbed(np: NowPlaying, stationUrl: string): EmbedBuilder {
   const bits: string[] = [];
   if (np.dj?.name) bits.push(`🎙️ ${np.dj.name}`);
   if (np.activeShow?.name) bits.push(`📻 ${np.activeShow.name}`);
-  if (np.stream?.bitrate) bits.push(` bitrate ${np.stream.bitrate}kbps`);
+  if (np.stream?.bitrate) bits.push(`📶 ${np.stream.bitrate}kbps`);
   const dur = fmtDur(t.duration);
   if (dur) bits.push(`⏱️ ~${dur}`);
 

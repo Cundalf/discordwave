@@ -10,7 +10,7 @@ Bot de Discord que sintoniza una sola radio: [SUB/WAVE](https://www.getsubwave.c
 
 > **El stream de la radio SOLO se abre si hay alguien escuchando.**
 
-Esto no es un check que alguien pueda olvidar: es la estructura del código. No hay preload ni buffer de fondo — el único `fetch` al stream está dentro del pipeline de un guild activo. Nada sintonizado ⇒ **0 conexiones TCP a tu radio**.
+Esto no es un check que alguien pueda olvidar: es la estructura del código. No hay preload ni buffer de fondo — el único request HTTP al stream está dentro del pipeline de un guild activo. Nada sintonizado ⇒ **0 conexiones TCP a tu radio**.
 
 Y de yapa: **cada guild sintonizando = 1 oyente real** en el contador de Icecast (el bot abre su propia conexión HTTP por server). Si querés que suene en 3 servers, tu panel va a mostrar 3 oyentes.
 
@@ -19,7 +19,7 @@ Y de yapa: **cada guild sintonizando = 1 oyente real** en el contador de Icecast
 ```
 /sintonizar            → join al canal de voz → recién ahí abre el stream → play
 last human left canal  → auto-leave tras 10 min (configurable) → stream cortado
-/salir                 → mata pipeline (FFmpeg + fetch) → oyente -1
+/salir                 → mata pipeline (FFmpeg + conexión HTTP) → oyente -1
 SIGTERM / docker stop  → shutdown elegante, 0 conexiones a la radio
 ```
 
@@ -88,12 +88,12 @@ Para correrlo en otro server/PC sin compilar: hacé `docker pull` y levantá con
 | `AUTO_LEAVE_MINUTES` | 10 | se va del canal cuando no queda oyentes humanos; `0` = off |
 | `DEFAULT_VOLUME` | 80 | 0-100 |
 | `NP_POLL_MS` | 30000 | cada cuánto refresca el "qué suena" para presencia / anuncios (solo con oyentes) |
-| `STREAM_RETRIES` | 6 | intentos de reconexión al stream |
+| `STREAM_RETRIES` | 6 | intentos de apertura del stream antes de rendirse (backoff 250ms–2s; 401/403/404 no reintentan) |
 | `RATE_LIMIT_TUNE_COOLDOWN_S` | 20 | anti-flapping de `/sintonizar` por guild |
 | `RATE_LIMIT_API_MAX_PER_10S` | 5 | máx de `/suena` + `/estado` cada 10s por guild |
 | `REQUEST_COOLDOWN_S` | 60 | cooldown de `/pedir` por usuario |
 | `REQUEST_GLOBAL_SPACING_S` | 60 | espaciado entre pedidos de todo el bot (= "Seconds between requests" de tu radio) |
-| `REQUEST_HOURLY_CAP` | 12 | tope de pedidos por hora del bot (= "Per-listener hourly cap" de tu radio) |
+| `REQUEST_HOURLY_CAP` | 8 | tope de pedidos por hora del bot (= "Per-listener hourly cap" de tu radio) |
 | `GUILD_ID` | — | registra comandos instantáneos en un server (deploy de testing) |
 
 > Ojo con los límites de la radio: son **por IP**, y el bot es una sola IP. Por eso el espaciado y el cap horario de `/pedir` son globales. Regla de oro: radio primero, `.env` para emparejar justo después.
@@ -109,7 +109,7 @@ docker pull ghcr.io/cundalf/discordwave:latest
 docker compose up -d   # en el server, con docker-compose.yml apuntando a esa imagen
 ```
 
-Arquitectura vulnerable: si preferís self-build, `docker compose build` funciona igual — el bot runtime necesita solo ffmpeg + libsodium, y opusscript Garland como fallback de opus.
+Imagen liviana: si preferís self-build, `docker compose build` funciona igual — el runtime necesita solo ffmpeg + libsodium; el encode de opus va por `opusscript` (JS puro, sin binarios nativos que compilar).
 
 ---
 
@@ -124,7 +124,7 @@ src/
 ├─ commands/          # slash commands + rate limiters (por guild y por usuario)
 ├─ radio/
 │  ├─ manager.ts      # RAIZ: qué guilds están escuchando (testeado sin Discord)
-│  ├─ pipeline.ts     # fetch HTTP → FFmpeg (s16le 48k) → stdout
+│  ├─ pipeline.ts     # HTTP (node:http) → FFmpeg (s16le 48k) → stdout
 │  ├─ discord-voice.ts# capa Discord real: joinVoiceChannel + AudioPlayer
 │  ├─ stream.ts       # URL + Basic auth (la password JAMÁS va en query)
 │  └─ health.ts       # radio viva/caída → presencia + respuestas
@@ -134,7 +134,8 @@ src/
 Diseño hexagonal de manual: `RadioManager` ignora a Discord (opera contra `GuildVoiceAdapter`/`RadioPipeline` testeados con fakes), y la capa real (`DiscordAdapter`) es delgada. Testear sin Discord ni red es la garantía de que las invariantes no se discocharon.
 
 ```bash
-npm test          # 68 tests (unit + e2e con FFmpeg real contra un stream fake)
+# Requiere Node ≥ 22.12 (ver engines en package.json)
+npm test          # 79 tests (unit + e2e con FFmpeg real contra un stream fake)
 npm run smoke     # check contra tu radio real: API + stream con password
 ```
 

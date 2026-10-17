@@ -3,20 +3,20 @@
  *
  *   GET stream.mp3 (HTTP Basic) ──> stdin ──> FFmpeg (s16le 48k 2ch) ──> stdout ──> AudioPlayer
  *
- * Garantía clave: el fetch HTTP al stream SOLO se abre aquí, dentro de start().
+ * Garantía clave: el request HTTP al stream SOLO se abre aquí, dentro de start().
  * No existe ningún preload en el arranque del bot. 0 guilds escuchando = 0
  * conexiones a la radio. La garantía la da la construcción: no hay otro
- * call-site de fetch al stream en todo el código.
+ * call-site HTTP al stream en todo el código.
  *
- * stop(): SIGKILL ffmpeg → el body HTTP queda con el pipe roto y el socket
- * muere → Icecast resta el listener al expire de su timeout.
- * Elobjetivo del diseño es que "no consumir stream" no dependa de un
+ * stop(): cierra el socket HTTP y SIGKILL ffmpeg → Icecast resta el listener
+ * al instante (sin keep-alive de undici de por medio).
+ * El objetivo del diseño es que "no consumir stream" no dependa de un
  * check que alguien pueda olvidar: es imposible abrir el stream sin guild.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { Readable } from "node:stream";
-import { streamFetchInit } from "./stream.js";
+import type { Readable } from "node:stream";
+import { openStream, streamFetchInit, type OpenedStream } from "./stream.js";
 
 export interface PipelineLogger {
   info: (s: string) => void;
@@ -37,12 +37,20 @@ export interface StreamPipelineDeps {
   streamPassword: string;
   /** fallback (deprecado): el manager lo sobreescribe con onEnded() */
   onEnded?: (reason: string) => void;
-  /**inyección para tests */
+  /** inyección para tests */
   spawnFn?: typeof spawn;
-  fetchFn?: typeof fetch;
   ffmpegPath?: string;
+  /** intentos totales de apertura del stream (default 1 = sin reintentos) */
+  streamRetries?: number;
   log?: PipelineLogger;
 }
+
+/** backoff de reintentos de apertura: 250ms, 500ms, 1s, 2s (tope) */
+function retryDelayMs(attempt: number): number {
+  return Math.min(2000, 250 * 2 ** (attempt - 1));
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class StreamPipeline {
   readonly #deps: StreamPipelineDeps;
@@ -51,6 +59,7 @@ export class StreamPipeline {
   #endedCbs: ((reason: string) => void)[] = [];
   #proc: ChildProcessWithoutNullStreams | null = null;
   #source: Readable | null = null;
+  #abortStream: (() => void) | null = null;
   #stopped = false;
 
   constructor(deps: StreamPipelineDeps) {
@@ -84,22 +93,47 @@ export class StreamPipeline {
    */
   async start(): Promise<void> {
     if (this.#proc) throw new Error("pipeline ya arrancado");
+    this.#stopped = false;
     const init = streamFetchInit(this.#deps.baseUrl, this.#deps.streamMount, this.#deps.streamPassword);
-    const fetchFn = this.#deps.fetchFn ?? fetch;
 
-    let body: ReadableStream<Uint8Array>;
-    try {
-      const res = await fetchFn(init.url, { headers: init.headers, redirect: init.redirect });
-      if (!res.ok || !res.body) {
-        const detail =
-          res.status === 401 || res.status === 403
-            ? "la radio rechazó el password del stream (¿cambió?)"
-            : `HTTP ${res.status}`;
-        throw new Error(detail);
+    // apertura con reintentos: errores transitorios (red, 5xx) se reintentan con
+    // backoff; 401/403/404 fallan al toque (no tiene sentido insistir)
+    const attempts = Math.max(1, Math.floor(this.#deps.streamRetries ?? 1));
+    let opened: OpenedStream | null = null;
+    let lastError = "sin respuesta";
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const candidate = await openStream(init.url, init.headers, { headersTimeoutMs: 10_000 });
+        if (candidate.statusCode >= 500) {
+          candidate.abort();
+          lastError = `HTTP ${candidate.statusCode}`;
+        } else {
+          opened = candidate;
+          break;
+        }
+      } catch (err) {
+        lastError = (err as Error).message;
       }
-      body = res.body as ReadableStream<Uint8Array>;
-    } catch (err) {
-      throw new Error(`no pude abrir el stream: ${(err as Error).message}`);
+      if (this.#stopped || attempt === attempts) break;
+      this.#log.warn(
+        `stream no abrió en guild ${this.#deps.guildId} (${lastError}); reintento ${attempt + 1}/${attempts}`,
+      );
+      await sleep(retryDelayMs(attempt));
+      if (this.#stopped) break; // stop() durante el backoff: ni intentar
+    }
+    if (this.#stopped) {
+      // stop() cayó durante los intentos: no dejar nada colgado
+      opened?.abort();
+      throw new Error("pipeline detenido durante el arranque");
+    }
+    if (!opened) throw new Error(`no pude abrir el stream: ${lastError}`);
+    if (opened.statusCode === 401 || opened.statusCode === 403) {
+      opened.abort();
+      throw new Error("no pude abrir el stream: la radio rechazó el password del stream (¿cambió?)");
+    }
+    if (opened.statusCode < 200 || opened.statusCode >= 300) {
+      opened.abort();
+      throw new Error(`no pude abrir el stream: HTTP ${opened.statusCode}`);
     }
 
     const ffmpegPath = this.#deps.ffmpegPath ?? "ffmpeg";
@@ -136,6 +170,11 @@ export class StreamPipeline {
       }
     });
 
+    // sin esto, un spawn fallido (ENOENT) tira un 'error' sin listener y mata el proceso
+    proc.on("error", (err) => {
+      this.#log.error(`ffmpeg[g${this.#deps.guildId}]: ${err.message}`);
+    });
+
     proc.on("close", (code) => {
       const wasStopped = this.#stopped;
       this.#proc = null;
@@ -144,25 +183,31 @@ export class StreamPipeline {
         this.#log.warn(
           `stream cerrado solo en guild ${this.#deps.guildId} (ffmpeg code=${code}${stderrTail ? `; ${stderrTail.split("\n")[0]}` : ""})`,
         );
+        this.#closeHttp(); // el body HTTP ya no tiene consumidor: socket afuera ya
         this.#fireEnded(`ffmpeg exit ${code}`);
       }
     });
 
-    // WebStream (fetch) → Node Readable → stdin ffmpeg
-    const nodeStream = Readable.fromWeb(body as unknown as Parameters<typeof Readable.fromWeb>[0]);
-    nodeStream.on("error", (err) => {
-      if (this.#stopped) return; // stop() ya lo desarmó
-      // body del fetch muerto (la radio se cayó / reset de conexión):
+    // IncomingMessage → stdin ffmpeg
+    const source = opened.body;
+    this.#source = source;
+    this.#abortStream = opened.abort;
+    const killStdin = (why: string): void => {
+      if (this.#stopped) return; // stop() o el propio cierre ya lo desarmaron
+      // body muerto (la radio se cayó / reset de conexión) o cierre sin 'end':
       // hay que EOFear el stdin o ffmpeg queda colgado esperando bytes para SIEMPRE
-      this.#log.warn(`fetch body error en guild ${this.#deps.guildId}: ${err.message}`);
+      this.#log.warn(`stream cortado en guild ${this.#deps.guildId}: ${why}`);
       try {
         proc.stdin.destroy();
       } catch {
         /* noop */
       }
+    };
+    source.on("error", (err) => killStdin(err.message));
+    source.on("close", () => {
+      if (!source.complete) killStdin("conexión cerrada sin terminar");
     });
-    nodeStream.pipe(proc.stdin);
-    this.#source = nodeStream;
+    source.pipe(proc.stdin);
     this.#log.info(`stream abierto para guild ${this.#deps.guildId}`);
   }
 
@@ -176,11 +221,7 @@ export class StreamPipeline {
     this.#stopped = true;
     const proc = this.#proc;
     this.#proc = null;
-    try {
-      this.#source?.destroy();
-    } catch {
-      /* noop */
-    }
+    this.#closeHttp();
     if (proc) {
       try {
         proc.stdout.destroy();
@@ -192,5 +233,22 @@ export class StreamPipeline {
       }
     }
     this.#log.info(`stream cerrado para guild ${this.#deps.guildId}`);
+  }
+
+  /** cierra el request HTTP y su socket ya (agent:false → sin keep-alive colgado) */
+  #closeHttp(): void {
+    const abort = this.#abortStream;
+    this.#abortStream = null;
+    try {
+      abort?.();
+    } catch {
+      /* noop */
+    }
+    try {
+      this.#source?.destroy();
+    } catch {
+      /* noop */
+    }
+    this.#source = null;
   }
 }

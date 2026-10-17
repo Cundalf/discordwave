@@ -65,6 +65,9 @@ class FakeAdapter implements GuildVoiceAdapter {
   simulateIdle(): void {
     this.#idleCb?.();
   }
+  simulateDestroyed(): void {
+    this.#destroyedCb?.();
+  }
 }
 
 function rig(now = () => 0) {
@@ -208,5 +211,81 @@ describe("RadioManager", () => {
     expect(manager.playingCount).toBe(0);
     expect(pipelines.get("g1")?.stopped).toBe(1);
     expect(pipelines.get("g2")?.stopped).toBe(1);
+  });
+
+  it("conexión de voz caída (kick de Discord) → teardown cascada con pipeline.stop", async () => {
+    const { manager, adapters, pipelines } = rig();
+    await manager.tune("g1", "c1");
+    adapters.get("g1")!.simulateDestroyed();
+    await vi.waitFor(() => {
+      expect(pipelines.get("g1")?.stopped).toBe(1);
+      expect(manager.playingCount).toBe(0);
+    });
+  });
+
+  it("leave durante el join: no llega a abrir pipeline", async () => {
+    const { manager, adapters, pipelines } = rig();
+    const origJoin = FakeAdapter.prototype.join;
+    let release!: () => void;
+    FakeAdapter.prototype.join = function () {
+      this.joined++;
+      return new Promise<void>((r) => {
+        release = r;
+      });
+    };
+    try {
+      const tuning = manager.tune("g1", "c1");
+      await vi.waitFor(() => expect(release).toBeTruthy());
+      await manager.leave("g1");
+      release();
+      const r = await tuning;
+      expect(r.status).toBe("error");
+      expect(manager.playingCount).toBe(0);
+      expect(pipelines.has("g1")).toBe(false); // nunca se creó
+      expect(adapters.get("g1")?.destroyed).toBeGreaterThanOrEqual(1);
+    } finally {
+      FakeAdapter.prototype.join = origJoin;
+    }
+  });
+
+  it("leave durante el start: corta el pipeline en vuelo y no queda guild", async () => {
+    const { manager, pipelines } = rig();
+    const origStart = FakePipeline.prototype.start;
+    let release!: () => void;
+    FakePipeline.prototype.start = function () {
+      this.started++;
+      return new Promise<void>((r) => {
+        release = r;
+      });
+    };
+    try {
+      const tuning = manager.tune("g1", "c1");
+      await vi.waitFor(() => expect(release).toBeTruthy());
+      await manager.leave("g1");
+      release();
+      const r = await tuning;
+      expect(r.status).toBe("error");
+      expect(pipelines.get("g1")!.stopped).toBeGreaterThanOrEqual(1);
+      expect(manager.playingCount).toBe(0);
+    } finally {
+      FakePipeline.prototype.start = origStart;
+    }
+  });
+
+  it("play() que revienta: pipeline detenido igual (nada queda sonando)", async () => {
+    const { manager, adapters, pipelines } = rig();
+    const origPlay = FakeAdapter.prototype.play;
+    FakeAdapter.prototype.play = function () {
+      throw new Error("player roto");
+    };
+    try {
+      const r = await manager.tune("g1", "c1");
+      expect(r.status).toBe("error");
+      expect(pipelines.get("g1")?.stopped).toBe(1);
+      expect(adapters.get("g1")?.destroyed).toBe(1);
+      expect(manager.playingCount).toBe(0);
+    } finally {
+      FakeAdapter.prototype.play = origPlay;
+    }
   });
 });

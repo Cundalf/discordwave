@@ -41,6 +41,7 @@ class DiscordAdapter implements GuildVoiceAdapter {
   readonly guildId: string;
   readonly #channelId: string;
   readonly #client: Client;
+  readonly #volume: number;
   #connection: VoiceConnection | null = null;
   #player: AudioPlayer | null = null;
   #destroyed = false;
@@ -48,10 +49,11 @@ class DiscordAdapter implements GuildVoiceAdapter {
   #destroyedCb: (() => void) | null = null;
   #adapterCreator: DiscordGatewayAdapterCreator | null = null;
 
-  constructor(client: Client, guildId: string, channelId: string) {
+  constructor(client: Client, guildId: string, channelId: string, volumePct = 100) {
     this.#client = client;
     this.guildId = guildId;
     this.#channelId = channelId;
+    this.#volume = Math.min(1, Math.max(0, volumePct / 100)); // DEFAULT_VOLUME 0-100
     this.#player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Stop },
     });
@@ -95,7 +97,12 @@ class DiscordAdapter implements GuildVoiceAdapter {
   play(pcm: NodeJS.ReadableStream | null): void {
     if (!this.#player || !pcm) return;
     // pcm ya es un Readable de Node (stdout de ffmpeg)
-    this.#player.play(createAudioResource(pcm as Readable, { inputType: StreamType.Raw }));
+    const resource = createAudioResource(pcm as Readable, {
+      inputType: StreamType.Raw,
+      inlineVolume: true,
+    });
+    resource.volume?.setVolume(this.#volume);
+    this.#player.play(resource);
   }
 
   destroy(): void {
@@ -141,18 +148,6 @@ class DiscordAdapter implements GuildVoiceAdapter {
 
   onDestroyed(cb: () => void): void {
     this.#destroyedCb = cb;
-  }
-
-  /** cablea el idle real del player (stream cortado) al callback del manager */
-  wirePlayerIdle(): void {
-    this.#player?.on("error", (err) => {
-      this.#idleCb?.();
-      throw err;
-    });
-  }
-
-  internalPlayer(): AudioPlayer | null {
-    return this.#player;
   }
 }
 

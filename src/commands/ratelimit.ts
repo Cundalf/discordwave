@@ -30,12 +30,13 @@ export class GuildRateLimiter {
   check(key: string, max: number, windowMs: number): LimiterCheck {
     if (max <= 0 || windowMs <= 0) return { ok: true };
     const t = this.#now();
-    let w = this.#windows.get(key);
+    const w = this.#windows.get(key);
 
     if (!w || t - w.start >= windowMs) {
-      if (w && this.#windows.size >= GuildRateLimiter.MAX_ENTRIES) {
-        // la ventana está muerta: reciclarla en lugar de hacer más hueco
-        this.#windows.delete(key);
+      if (!w && this.#windows.size >= GuildRateLimiter.MAX_ENTRIES) {
+        // cota dura: evict del más viejo (Map conserva orden de inserción)
+        const oldest = this.#windows.keys().next().value;
+        if (oldest !== undefined) this.#windows.delete(oldest);
       }
       this.#windows.set(key, { start: t, hits: 1 });
       return { ok: true };

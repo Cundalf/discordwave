@@ -12,6 +12,7 @@ loadDotenv();
 const base = process.env["SUBWAVE_BASE_URL"]!;
 const pw = process.env["SUBWAVE_STREAM_PASSWORD"]!;
 const mount = process.env["SUBWAVE_STREAM_MOUNT"] ?? "/stream.mp3";
+const retries = Number(process.env["STREAM_RETRIES"] ?? "1") || 1;
 
 let failures = 0;
 const check = (name: string, ok: boolean, extra?: string) => {
@@ -38,6 +39,7 @@ const pipeline = new StreamPipeline({
   baseUrl: base,
   streamMount: mount,
   streamPassword: pw,
+  streamRetries: retries,
   ffmpegPath: ffmpegPath(),
   onEnded: () => {},
   log: { info: (s) => console.log(`    ${s}`), warn: (s) => console.log(`    ${s}`), error: (s) => console.log(`    ${s}`) },

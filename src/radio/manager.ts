@@ -136,11 +136,19 @@ export class RadioManager {
         void this.leave(guildId);
       });
       adapter.onDestroyed(() => {
-        this.#guilds.delete(guildId);
+        // conexión de voz caída (kick de Discord, red): teardown COMPLETO,
+        // no solo borrar del mapa — si no, el stream queda huérfano para siempre
+        void this.leave(guildId);
       });
 
       // 1) join de voz
       await adapter.join();
+
+      // leave() pudo caer durante el join: no abrir el stream si ya no corresponde
+      if (st.leaving || !this.#guilds.has(guildId)) {
+        adapter.destroy();
+        return { status: "error", reason: "cancelado durante el join" };
+      }
 
       // 2) recién AHORA se abre el stream. El orden importa: si el join falla,
       // nunca abrimos el fetch. Spawn garantizado post-join.
@@ -155,9 +163,18 @@ export class RadioManager {
         await pipeline.start();
       } catch (err) {
         // no abrir stream ⇒ deshacer el join para no dejar el bot colgado en un canal mudo
+        pipeline.stop(); // start() pudo dejar algo a medio abrir
         this.#guilds.delete(guildId);
         adapter.destroy();
+        if (st.leaving) return { status: "error", reason: "cancelado durante el arranque" };
         return { status: "channel-error", reason: (err as Error).message };
+      }
+
+      // leave() pudo caer durante el start: el pipeline ya está detenido, no hay que sonar
+      if (st.leaving || !this.#guilds.has(guildId)) {
+        pipeline.stop();
+        adapter.destroy();
+        return { status: "error", reason: "cancelado durante el arranque" };
       }
 
       // 3) play
@@ -166,6 +183,7 @@ export class RadioManager {
       await this.#onOpenStream?.(guildId);
       return { status: "playing" };
     } catch (err) {
+      st.pipeline?.stop(); // play/onOpenStream fallaron: nada puede quedar sonando
       this.#guilds.delete(guildId);
       adapter.destroy();
       return { status: "error", reason: (err as Error).message };

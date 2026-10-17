@@ -54,7 +54,7 @@ describe("RequestThrottle", () => {
   });
 
   it("tope horario global (per-listener hourly cap): pasa N, bloquea la N+1", () => {
-    const { th, advance, t } = rig({ cooldownS: 60, spacingS: 60, hourlyCap: 3 });
+    const { th, advance } = rig({ cooldownS: 60, spacingS: 60, hourlyCap: 3 });
     // 3 pedidos espaciados legalmente
     for (const u of ["u1", "u2", "u3"]) {
       expect(th.check(u).ok).toBe(true);

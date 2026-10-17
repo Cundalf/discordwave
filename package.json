@@ -5,7 +5,7 @@
   "description": "Bot de Discord que reproduce una radio SUB/WAVE",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "scripts": {
     "build": "tsc",
@@ -17,7 +17,6 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.0",
     "discord.js": "^14.25.1",
     "dotenv": "^17.2.3",
@@ -30,14 +29,15 @@
     "ffmpeg-static": "^5.3.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.5"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
-    "ffmpeg-static@5.3.0": true,
-    "@discordjs/opus@0.10.0": true
+    "ffmpeg-static@5.3.0": true
   },
-  "optionalDependencies": {
-    "@discordjs/opus": "^0.10.0"
+  "overrides": {
+    "@discordjs/node-pre-gyp": {
+      "tar": "^7.5.22"
+    }
   }
 }

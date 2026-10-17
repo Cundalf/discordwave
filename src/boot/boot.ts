@@ -89,13 +89,14 @@ export async function boot(): Promise<BootHandle> {
 
   const manager = new RadioManager({
     adapterFactory: (guildId, channelId): GuildVoiceAdapter =>
-      new DiscordAdapter(client, guildId, channelId),
+      new DiscordAdapter(client, guildId, channelId, config.defaultVolume),
     pipelineFactory: (guildId): RadioPipeline =>
       new StreamPipeline({
         guildId,
         baseUrl: config.subwave.baseUrl,
         streamMount: config.subwave.streamMount,
         streamPassword: config.subwave.streamPassword,
+        streamRetries: config.streamRetries,
         ffmpegPath: ffmpegPath(),
         onEnded: (reason) => {
           // el stream murió solo (corte neto, no stop normal) → radio abajo

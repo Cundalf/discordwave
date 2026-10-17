@@ -128,6 +128,23 @@ describe("ApiClient", () => {
     expect(np.listeners).toBeUndefined();
   });
 
+  it("429 con body no-JSON igual mapea RATE_LIMITED (manda el status)", async () => {
+    const bad = {
+      ok: false,
+      status: 429,
+      json: async () => {
+        throw new Error("no es JSON");
+      },
+      headers: new Headers(),
+    } as unknown as Response;
+    const f = mockFetch(() => bad);
+    const api = new ApiClient(base, pw, f as typeof fetch);
+    await expect(api.requestTrack("x")).rejects.toMatchObject({
+      code: "RATE_LIMITED",
+      retryAfterS: 60,
+    });
+  });
+
   it("errores de red levantan NETWORK", async () => {
     const f = mockFetch(() => {
       throw new Error("ECONNRESET");

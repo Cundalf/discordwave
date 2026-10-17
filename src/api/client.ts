@@ -32,14 +32,19 @@ export class ApiClient {
   }
 
   async #parse<T>(res: Response, path: string): Promise<T> {
-    let body: unknown;
+    let body: unknown = null;
+    let parsed = false;
     try {
       body = await res.json();
+      parsed = true;
     } catch {
-      throw new ApiError("HTTP", `${path}: respuesta no-JSON (HTTP ${res.status})`);
+      /* body no-JSON: manda el status */
     }
     if (!res.ok) {
       throw this.#errorForStatus(res, body, path);
+    }
+    if (!parsed) {
+      throw new ApiError("HTTP", `${path}: respuesta no-JSON (HTTP ${res.status})`);
     }
     return body as T;
   }

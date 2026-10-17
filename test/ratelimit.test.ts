@@ -52,4 +52,14 @@ describe("GuildRateLimiter (fixed window)", () => {
     expect(rl.size).toBeLessThanOrEqual(900);
     // el más viejo ya expiró, el mapa debe haberlo soltado al releer
   });
+
+  it("cota dura con ventanas vivas: nunca supera MAX_ENTRIES", () => {
+    const rl = new GuildRateLimiter(() => 0); // ventanas siempre vivas
+    for (let i = 0; i < GuildRateLimiter.MAX_ENTRIES + 200; i++) {
+      rl.check(`g${i}`, 1, 10_000);
+    }
+    expect(rl.size).toBeLessThanOrEqual(GuildRateLimiter.MAX_ENTRIES);
+    // la key nueva sigue funcionando tras el evict
+    expect(rl.check("nueva", 1, 10_000).ok).toBe(true);
+  });
 });
