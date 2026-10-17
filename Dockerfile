@@ -1,5 +1,5 @@
 # ── build ──────────────────────────────────────────────────
-FROM node:22-bookworm-slim AS build
+FROM node:25-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -8,7 +8,7 @@ COPY src ./src
 RUN npm run build
 
 # ── runtime ────────────────────────────────────────────────
-FROM node:22-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 # ffmpeg del sistema + sodium runtime deps
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
